@@ -55,7 +55,7 @@ var _ dailyPurchaseSource = (*upstream.Service)(nil)
 var _ staleSiteSyncer = (*upstream.Service)(nil)
 
 const (
-	// 日结补跑窗口：昨日营收/成本未完成时每小时重试；更早几天只补“完全没有成本记录”的日子。
+	// 日结补跑窗口：昨日营收/成本未完成时每小时重试；更早几天成本日结未完成的也按当日实际消费重算。
 	purchaseRetryDays = 7
 	// 成本采样间隔；23:58 额外采样一次，让日内成本尽量接近全天。
 	purchaseSampleInterval = 10 * time.Minute
@@ -383,8 +383,9 @@ func settlementWindowReady(now time.Time) bool {
 	return now.Hour() > 0 || now.Minute() >= 5
 }
 
-// settlePending 补跑最近几天未完成的日结。昨日：营收或成本未完成即重试（成本按当前倍率，
-// 与每晚日结口径一致）；更早的日子只补“完全没有成本记录”的成本，不改写已有的采样或已结算值。
+// settlePending 补跑最近几天未完成的日结。昨日：营收或成本未完成即重试；更早的日子只要成本
+// 日结未完成（没有记录，或只有日结失败时留下的不完整日内采样），就按该日上游实际消费重算成本。
+// 成本均按当前充值倍率，与每晚日结口径一致；已完成的日结不再改写。
 func (s *MetricsService) settlePending(ctx context.Context) error {
 	if !settlementWindowReady(s.clock()) {
 		return nil
@@ -423,26 +424,29 @@ type settlementJob struct {
 	revenue, purchase bool
 }
 
+// pendingSettlements 列出待补跑的日结：昨日排第一（营收或成本任一未完成），其后从近到远
+// 补更早几天未完成的成本日结。完整日结会覆盖不完整的日内采样；仍只有部分站点成功时，
+// 写入合并只抬高已有成本，不会冲低。昨日优先，避免补跑耗尽批次时限时挤掉昨日。
 func pendingSettlements(rows []DailySnapshot, yesterday string) []settlementJob {
-	jobs := make([]settlementJob, 0, 2)
 	var current *DailySnapshot
+	var older []settlementJob
 	for i := range rows {
 		date := rows[i].Date.Format("2006-01-02")
-		if date == yesterday {
+		switch {
+		case date == yesterday:
 			current = &rows[i]
-			continue
-		}
-		if date < yesterday && !rows[i].PurchaseComplete && !rows[i].PurchaseRecorded {
-			jobs = append(jobs, settlementJob{date: date, purchase: true})
+		case date < yesterday && !rows[i].PurchaseComplete:
+			older = append(older, settlementJob{date: date, purchase: true})
 		}
 	}
+	sort.Slice(older, func(i, j int) bool { return older[i].date > older[j].date })
+	jobs := make([]settlementJob, 0, len(older)+1)
 	if current == nil {
-		return append(jobs, settlementJob{date: yesterday, revenue: true, purchase: true})
-	}
-	if !current.RevenueComplete || !current.PurchaseComplete {
+		jobs = append(jobs, settlementJob{date: yesterday, revenue: true, purchase: true})
+	} else if !current.RevenueComplete || !current.PurchaseComplete {
 		jobs = append(jobs, settlementJob{date: yesterday, revenue: !current.RevenueComplete, purchase: !current.PurchaseComplete})
 	}
-	return jobs
+	return append(jobs, older...)
 }
 
 // ReconcileRevenue 仅从仍有完整日志的真实昨日恢复营收，不将今天倍率追溯应用于历史成本。

@@ -206,19 +206,51 @@ func TestSettlementPartialPurchaseIsPersistedAndRetried(t *testing.T) {
 
 func TestPendingSettlementsWindow(t *testing.T) {
 	rows := []DailySnapshot{
+		// 已有日内采样但日结未完成的旧日（旧版日结失败留下的偏低成本）：按实际消费重算成本。
+		settlementRow("2026-10-19", func(row *DailySnapshot) {
+			row.RevenueComplete, row.PurchaseRecorded, row.TodayPurchase = true, true, 12
+		}),
 		// 完全没有成本记录的旧日：只补成本。
 		settlementRow("2026-10-20", func(row *DailySnapshot) { row.RevenueComplete = true }),
-		// 已有日内采样的旧日：不改写。
-		settlementRow("2026-10-19", func(row *DailySnapshot) { row.RevenueComplete, row.PurchaseRecorded = true, true }),
+		// 成本日结已完成的旧日：不再改写。
+		settlementRow("2026-10-21", func(row *DailySnapshot) { row.PurchaseComplete, row.PurchaseRecorded = true, true }),
 		// 已完成的昨日：无需处理。
 		settlementRow("2026-10-22", func(row *DailySnapshot) { row.RevenueComplete, row.PurchaseComplete = true, true }),
 	}
 	jobs := pendingSettlements(rows, "2026-10-22")
-	if len(jobs) != 1 || jobs[0] != (settlementJob{date: "2026-10-20", purchase: true}) {
+	want := []settlementJob{{date: "2026-10-20", purchase: true}, {date: "2026-10-19", purchase: true}}
+	if len(jobs) != len(want) || jobs[0] != want[0] || jobs[1] != want[1] {
 		t.Fatalf("jobs=%+v", jobs)
 	}
 	if jobs := pendingSettlements(nil, "2026-10-22"); len(jobs) != 1 || jobs[0] != (settlementJob{date: "2026-10-22", revenue: true, purchase: true}) {
 		t.Fatalf("missing yesterday=%+v", jobs)
+	}
+	// 昨日未完成时排在最前，旧日从近到远，避免批次时限先耗在旧日上。
+	rows[3].PurchaseComplete = false
+	jobs = pendingSettlements(rows, "2026-10-22")
+	if len(jobs) != 3 || jobs[0] != (settlementJob{date: "2026-10-22", purchase: true}) || jobs[1].date != "2026-10-20" || jobs[2].date != "2026-10-19" {
+		t.Fatalf("yesterday must come first: %+v", jobs)
+	}
+}
+
+// 旧版日结失败时只留下不完整的日内采样（成本偏低）；补跑按该日实际消费重算并标记完成。
+func TestSettlementResettlesOlderPartialSample(t *testing.T) {
+	s, r, p, u := newSettlementService()
+	r.rows = []DailySnapshot{
+		settlementRow("2026-10-19", func(row *DailySnapshot) {
+			row.RevenueComplete, row.PurchaseRecorded, row.TodayProfit, row.TodayPurchase = true, true, 100, 12
+		}),
+		settlementRow("2026-10-22", func(row *DailySnapshot) { row.RevenueComplete, row.PurchaseComplete = true, true }),
+	}
+	if err := s.settlePending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.dates) != 0 || len(u.calls) != 1 || u.calls[0] != "u/a/2026-10-19" {
+		t.Fatalf("older re-settlement must be purchase only: dates=%v calls=%v", p.dates, u.calls)
+	}
+	got := r.writes[0]
+	if got.RevenueComplete || !got.PurchaseComplete || !got.PurchaseRecorded || got.TodayPurchase != 40 || !got.Settlement {
+		t.Fatalf("snapshot=%+v", got)
 	}
 }
 
