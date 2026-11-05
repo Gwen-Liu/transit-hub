@@ -896,18 +896,36 @@ func sub2APIGroupDailyCost(item any) float64 {
 	return *cost
 }
 
+const (
+	// newAPISiteLogStatPath 是 new-api 管理员的全站日志统计接口，汇总本站所有用户的消费；
+	// 本站（admin 工作区）营收与分组用量必须使用它。
+	newAPISiteLogStatPath = "/api/log/stat"
+	// newAPISelfLogStatPath 只统计当前登录账号自己的消费，适用于上游站点（我在上游花了多少），
+	// 不能用来计算本站营收，否则只会统计到管理员本人的调用。
+	newAPISelfLogStatPath = "/api/log/self/stat"
+)
+
+// FetchNewAPIGroupDailyStats 统计当前登录账号自己今日在各分组的消费，用于上游站点。
+// 本站分组用量走 FetchAdminGroupDailyStats 的全站口径。
 func (s *PlatformService) FetchNewAPIGroupDailyStats(session Session, groups []GroupInfo) ([]GroupDailyStat, error) {
+	return s.fetchNewAPIGroupDailyStats(session, groups, newAPISelfLogStatPath)
+}
+
+// fetchNewAPIGroupDailyStats 按分组逐个查询 statPath 在今日窗口内的消费；整轮共用同一个时间窗口，
+// 避免跨零点时不同分组落在不同的「今天」。
+func (s *PlatformService) fetchNewAPIGroupDailyStats(session Session, groups []GroupInfo, statPath string) ([]GroupDailyStat, error) {
 	if session.Platform != PlatformNewAPI || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
 	cookieOptions := newAPIAuthOptions(session)
+	startTS, endTS := todayStart(), todayEnd()
 	stats := make([]GroupDailyStat, 0, len(groups))
 	for _, group := range groups {
 		name := strings.TrimSpace(group.Name)
 		if name == "" || name == defaultDisplay {
 			continue
 		}
-		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(todayStart()) + "&end_timestamp=" + strconvInt(todayEnd()) + "&group=" + url.QueryEscape(name)
+		statURL := session.BaseURL + statPath + "?type=2&start_timestamp=" + strconvInt(startTS) + "&end_timestamp=" + strconvInt(endTS) + "&group=" + url.QueryEscape(name)
 		payload, err := s.httpClient.requestJSON(statURL, cookieOptions)
 		if err != nil {
 			return nil, err
@@ -1368,30 +1386,24 @@ func todayEnd() int64 {
 	return end.Unix()
 }
 
-// ListSub2APIKeys 获取上游 Sub2API 站点的 API Key 列表。
-// 按创建时间倒序返回，最多 100 条。每条包含 ID、Key 值、名称、所属分组等信息。
+// ListSub2APIKeys 获取上游 Sub2API 站点的全部 API Key（按创建时间倒序逐页拉取，不只取第一页）。
+// 每条包含 ID、Key 值、名称、所属分组等信息。
 func (s *PlatformService) ListSub2APIKeys(session Session) ([]Sub2APIKeyItem, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	response, err := s.httpClient.requestJSON(
-		session.BaseURL+"/api/v1/keys?page=1&page_size=100&sort_by=created_at&sort_order=desc",
-		requestOptions{
-			AccessToken: session.AccessToken,
-			TokenType:   session.TokenType,
-		},
-	)
+	records, err := s.collectUpstreamKeyRecords(func(page int) string {
+		return session.BaseURL + "/api/v1/keys?page=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(upstreamKeyListPageSize) + "&sort_by=created_at&sort_order=desc"
+	}, requestOptions{
+		AccessToken: session.AccessToken,
+		TokenType:   session.TokenType,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	items := dataArray(response.Payload)
-	keys := make([]Sub2APIKeyItem, 0, len(items))
-	for _, item := range items {
-		record, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
+	keys := make([]Sub2APIKeyItem, 0, len(records))
+	for _, record := range records {
 		keyItem := Sub2APIKeyItem{
 			ID:   groupID2(record),
 			Name: safeString(record, "name"),
@@ -1659,12 +1671,13 @@ func (s *PlatformService) fetchNewAPIAdminGroups(session Session) ([]GroupInfo, 
 	return newAPIGroups(groupsPayload.Payload, pricingPayload.Payload), nil
 }
 
-// FetchAdminGroupDailyStats 平台中性的分组今日用量统计。
-// sub2api 复用 FetchSub2APIGroupDailyStats 的多级降级策略，new-api 复用 FetchNewAPIGroupDailyStats 的逐组查询。
+// FetchAdminGroupDailyStats 平台中性的本站（admin 工作区）分组今日用量统计。
+// sub2api 复用 FetchSub2APIGroupDailyStats 的多级降级策略；new-api 用管理员全站统计接口逐组查询，
+// 不能复用上游口径的 FetchNewAPIGroupDailyStats，它只统计当前登录账号自己。
 func (s *PlatformService) FetchAdminGroupDailyStats(session Session, groups []GroupInfo) ([]GroupDailyStat, error) {
 	switch session.Platform {
 	case PlatformNewAPI:
-		return s.FetchNewAPIGroupDailyStats(session, groups)
+		return s.fetchNewAPIGroupDailyStats(session, groups, newAPISiteLogStatPath)
 	default:
 		return s.FetchSub2APIGroupDailyStats(session, groups)
 	}
@@ -1871,28 +1884,20 @@ func (s *PlatformService) FetchNewAPITokenKey(session Session, tokenID string) (
 	return "", newRequestError(ErrorInvalidResponse, PlatformNewAPI)
 }
 
-// ListNewAPITokens 列出上游 new-api 站点的 token 列表。
+// ListNewAPITokens 列出上游 new-api 站点的全部 token（逐页拉取，不只取第一页）。
 // 返回与 Sub2APIKeyItem 相同的结构，便于前端统一使用。
 func (s *PlatformService) ListNewAPITokens(session Session) ([]Sub2APIKeyItem, error) {
 	if session.Platform != PlatformNewAPI {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
-	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/token/?p=1&page_size=100", requestOptions{
-		Cookie:      session.Cookie,
-		UserID:      session.UserID,
-		AccessToken: session.AccessToken,
-		TokenType:   session.TokenType,
-	})
+	records, err := s.collectUpstreamKeyRecords(func(page int) string {
+		return session.BaseURL + "/api/token/?p=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(upstreamKeyListPageSize)
+	}, newAPIAuthOptions(session))
 	if err != nil {
 		return nil, err
 	}
-	items := dataArray(response.Payload)
-	tokens := make([]Sub2APIKeyItem, 0, len(items))
-	for _, item := range items {
-		record, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
+	tokens := make([]Sub2APIKeyItem, 0, len(records))
+	for _, record := range records {
 		token := Sub2APIKeyItem{
 			ID:   groupID2(record),
 			Name: safeString(record, "name"),
@@ -1912,6 +1917,57 @@ func (s *PlatformService) ListNewAPITokens(session Session) ([]Sub2APIKeyItem, e
 		tokens = append(tokens, token)
 	}
 	return tokens, nil
+}
+
+const (
+	// upstreamKeyListPageSize / upstreamKeyListMaxPages 控制上游 key 列表的分页拉取。
+	// 以前只取第一页（100 条），key 超过 100 个时绑定弹窗和凭据校验都会找不到较早创建的 key。
+	upstreamKeyListPageSize = 100
+	upstreamKeyListMaxPages = 100
+)
+
+// collectUpstreamKeyRecords 逐页拉取上游 key 列表并按 ID 去重，满足任一条件即停止：
+//   - 已拿到响应声明的 total 条记录；
+//   - 遇到空页；
+//   - 某一页没有带来任何新 ID（上游忽略分页参数、反复返回同一页时防止重复拉取）。
+//
+// 上游没有返回 total 时不以「短页」作为结束条件：部分旧版本忽略 page_size、每页固定条数，
+// 只能靠空页或无新 ID 判断结束，代价是列表不足一页时多一次请求。
+func (s *PlatformService) collectUpstreamKeyRecords(pageURL func(page int) string, options requestOptions) ([]map[string]any, error) {
+	records := make([]map[string]any, 0)
+	seen := make(map[string]struct{})
+	for page := 1; page <= upstreamKeyListMaxPages; page++ {
+		response, err := s.httpClient.requestJSON(pageURL(page), options)
+		if err != nil {
+			return nil, err
+		}
+		items := dataArray(response.Payload)
+		if len(items) == 0 {
+			break
+		}
+		added := 0
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id := groupID2(record); id != "" {
+				if _, duplicate := seen[id]; duplicate {
+					continue
+				}
+				seen[id] = struct{}{}
+			}
+			records = append(records, record)
+			added++
+		}
+		if added == 0 {
+			break
+		}
+		if total, hasTotal := paginationTotal(response.Payload); hasTotal && len(records) >= total {
+			break
+		}
+	}
+	return records, nil
 }
 
 // DeleteNewAPIToken 删除上游 new-api 站点的指定 token。

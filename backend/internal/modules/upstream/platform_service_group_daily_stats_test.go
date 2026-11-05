@@ -53,7 +53,8 @@ func TestFetchAdminGroupDailyStats_DispatchesByPlatform(t *testing.T) {
 
 	t.Run("new-api uses per-group log stat with quota conversion", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/log/self/stat" {
+			// 本站分组用量必须走管理员全站统计接口；/api/log/self/stat 只会统计管理员本人。
+			if r.URL.Path != "/api/log/stat" {
 				t.Fatalf("unexpected new-api path: %s", r.URL.Path)
 			}
 			group := r.URL.Query().Get("group")
@@ -83,6 +84,25 @@ func TestFetchAdminGroupDailyStats_DispatchesByPlatform(t *testing.T) {
 		}
 		if byName["vip"] != 2.5 {
 			t.Errorf("vip amount = %.4f, want 2.5000 (quota/quotaPerUnit conversion)", byName["vip"])
+		}
+	})
+
+	// 上游站点「我在各分组花了多少」只能统计当前登录账号自己，不能被本站的全站口径误改。
+	t.Run("new-api upstream group stats stay on self log stat", func(t *testing.T) {
+		var paths []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			writeJSON(w, map[string]any{"data": map[string]any{"quota": 100000}})
+		}))
+		defer server.Close()
+
+		service := newTestPlatformService(server.Client())
+		session := Session{Platform: PlatformNewAPI, BaseURL: server.URL, Cookie: "session=abc", UserID: "1", QuotaPerUnit: 100000}
+		if _, err := service.FetchNewAPIGroupDailyStats(session, []GroupInfo{{Name: "default"}}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(paths) != 1 || paths[0] != "/api/log/self/stat" {
+			t.Fatalf("upstream group stats must use /api/log/self/stat, got %v", paths)
 		}
 	})
 }

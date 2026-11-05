@@ -12,7 +12,7 @@
 | 管理员会话有效性与 my-sites 会话同步 | `my_sites/service.go`；`dashboard/service.go` | `my_sites/service_status_test.go`；`dashboard/service_refresh_test.go` |
 | 旧库 priority_mode 升级兼容 | `backend/internal/database/migrations/000018_connection_health_strategy_mode.sql` | 同目录 `runner_test.go` |
 | 公网目标、DNS 重验、重定向及站点协议 | `backend/internal/security/egress/policy.go`；upstream 与 connection_health 默认客户端 | `egress/http_policy_test.go`（位于 security 下）、`upstream/http_compat_test.go`、`connection_health/http_compat_test.go`、`backend/internal/httpserver/upstream_http_test.go` |
-| 认证、验证码、登录限速与凭据最小展示 | `auth/`、`users/types.go`、`my_sites/connection_service.go` | `auth/security_test.go`、`users/types_test.go`、`my_sites/credential_preview_test.go` |
+| 认证、验证码、登录限速与凭据最小展示 | `auth/`、`my_sites/connection_service.go`；`GET /api/users` 已删除，不以加登录校验的方式恢复 | `auth/security_test.go`、`my_sites/credential_preview_test.go` |
 | Ticket/Lottery 嵌入身份绑定与撤销 | `tickets/`、`lottery/service.go` | 同模块身份、来源与会话撤销回归 |
 | 请求/响应预算与工作区调度隔离 | `backend/internal/shared/httpjson/`、`backend/internal/httpserver/server.go`、`settings/`、`upstream/service.go` | 请求/响应上限、`settings/strategy_workspace_test.go`、`upstream/refresh_scheduler_test.go` |
 | 真实对接幂等预留与补偿边界 | `my_sites/connection_service.go`、`repository.go`；迁移 `000019` | `my_sites/connection_idempotency_test.go`、`backend/internal/database/migrations/idempotency_migration_test.go` |
@@ -28,6 +28,24 @@
 - 公网目标校验仍在入口、实际请求、每跳重定向及拨号前执行；私网、环回、链路本地、特殊用途地址和混合 DNS 不因此开放。显式 HTTP 入口不授权 HTTPS 重定向降级；跨来源敏感 Header 与带请求体的重放由统一策略控制。
 - 通知和匿名嵌入等非站点业务保留原 HTTPS-only 客户端；不因上游支持 HTTP 而跟随放宽。测试必须同时证明新站点入口可用与原 HTTPS-only 拒绝行为仍有效。
 - 早先创建失败且没有 Session 的站点，需在编辑界面重新提交该站点认证信息并保存，成功建立会话后再同步；单纯刷新不会重新构造缺失凭据。凭据不写入维护记录或测试证据。
+
+## 与作者 1.x 的关系
+
+作者从 v1.0.0 起把产品改成只读的经营分析后台，删除了分组对接、调价映射与自动调价、活动调价、分组健康、抽奖、排行榜和旧版嵌入工单。Fork 继续维护 0.1.x 并保留这些功能，不合并作者 1.x；作者的修复逐个判断，对 Fork 也成立的单独移植。成本口径两边相同（上游当天实际消费 × 该上游充值倍率），作者 `e3ca89b` 的“站点定价”只作用于营收，Fork 日结不替换为作者的定稿逻辑。
+
+已移植（对照作者 `upstream/main` = `e9e14d9`，后端路径同样以 `backend/internal/modules/` 为前缀）：
+
+| 作者提交 | Fork 中的实现 | 回归入口 |
+| --- | --- | --- |
+| `9c8731f` 上游 Key 列表逐页拉取 | `upstream/platform_service.go` | `upstream/platform_service_key_list_test.go` |
+| `82bc5b7` 探活回退使用账号列表里的 base URL | `upstream/platform_accounts.go`、`probe_credentials.go` | `upstream/platform_accounts_test.go`、`probe_credentials_test.go` |
+| `b680019` 删除 `GET /api/users` | `backend/internal/httpserver/server.go`；`users` 模块已删除 | 无（接口与模块已不存在） |
+| `e3ca89b` 中的 New API 本站营收与分组用量改用全站 `/api/log/stat` | `upstream/daily_usage.go`、`platform_service.go`；上游消费仍用 `/api/log/self/stat` | `upstream/daily_usage_test.go`、`platform_service_group_daily_stats_test.go` |
+| `1f07c9d` 兼容迁移遵守 search_path，Fork 的 `000019` 同样处理 | 迁移 `000016`、`000018`、`000019` | `backend/internal/database/migrations/runner_postgres_test.go`（需 `TEST_DATABASE_URL`） |
+
+Fork 自己补的同类修复：`dashboard/service.go` 的 `RefreshAdminSession` 刷新出新令牌时先保存再校验，避免校验失败时丢失已轮换的令牌（对应作者 `e9a91e1` 的会话轮换部分），回归入口 `dashboard/service_refresh_test.go`。
+
+待移植：`e9a91e1` 新版 new-api 鉴权（短期 JWT、刷新令牌轮换、个人访问令牌）；`9d631fd` 凭据静态加密（需先定密钥管理与备份）。不移植：在线更新（下载地址写死作者仓库）、TransitLink 客户端配置与工单。
 
 ## 更新作者版本时的最小流程
 

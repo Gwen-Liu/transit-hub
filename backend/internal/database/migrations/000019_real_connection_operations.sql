@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_real_connection_operations_status
 -- 避免滚动升级时重试同一个 operation_id 再次触发远端创建。
 DO $$
 BEGIN
-    IF to_regclass('public.real_connections') IS NOT NULL THEN
+    IF to_regclass('real_connections') IS NOT NULL THEN
         INSERT INTO real_connection_operations (
             user_id, workspace_admin_account_id, operation_id, request_hash,
             owner_token, status, connection_id, remote_upstream_key_id,

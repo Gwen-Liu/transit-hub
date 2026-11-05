@@ -57,7 +57,12 @@ func (s *PlatformService) fetchDatedUsage(ctx context.Context, session Session, 
 		query := url.Values{"start_date": {startDate}, "end_date": {endDate}, "timezone": {"Asia/Shanghai"}}
 		path += "?" + query.Encode()
 	case PlatformNewAPI:
-		path = "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(start.Unix()) + "&end_timestamp=" + strconvInt(end.Unix())
+		// 本站营收走管理员全站统计接口；上游消费只统计当前登录账号自己。
+		statPath := newAPISelfLogStatPath
+		if admin {
+			statPath = newAPISiteLogStatPath
+		}
+		path = statPath + "?type=2&start_timestamp=" + strconvInt(start.Unix()) + "&end_timestamp=" + strconvInt(end.Unix())
 		options = newAPIAuthOptions(session)
 	default:
 		return 0, newRequestError(ErrorInvalidResponse, session.Platform)

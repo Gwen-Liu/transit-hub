@@ -33,7 +33,12 @@ func TestDatedUsagePlatformBoundaries(t *testing.T) {
 					} else {
 						// 独立 UTC oracle：北京时间 10/22 自然日为 UTC 10/21 16:00 至 10/22 15:59:59。
 						start := time.Date(2026, 10, 21, 16, 0, 0, 0, time.UTC).Unix()
-						if r.URL.Path != "/api/log/self/stat" || q.Get("type") != "2" || q.Get("start_timestamp") != fmt.Sprint(start) || q.Get("end_timestamp") != fmt.Sprint(start+86399) {
+						// 本站营收必须走全站统计 /api/log/stat；上游消费只统计当前登录账号自己。
+						path := "/api/log/self/stat"
+						if admin {
+							path = "/api/log/stat"
+						}
+						if r.URL.Path != path || q.Get("type") != "2" || q.Get("start_timestamp") != fmt.Sprint(start) || q.Get("end_timestamp") != fmt.Sprint(start+86399) {
 							t.Errorf("unexpected request %s", r.URL)
 						}
 						fmt.Fprint(w, `{"success":true,"data":{"quota":1250}}`)

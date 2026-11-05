@@ -114,7 +114,7 @@ func TestRefreshAdminSession_RefreshFailed(t *testing.T) {
 	}
 }
 
-// TestRefreshAdminSession_VerifyFailed 覆盖：refresh 成功但 VerifyAdmin 失败，返回 ErrorAdminOnly，不写回 store。
+// TestRefreshAdminSession_VerifyFailed 覆盖：refresh 没有换出新令牌且 VerifyAdmin 失败，返回 ErrorAdminOnly，不写回 store。
 func TestRefreshAdminSession_VerifyFailed(t *testing.T) {
 	store := newFakeSessionStore()
 	store.set("user-1", "account-1", AdminSession{
@@ -134,6 +134,32 @@ func TestRefreshAdminSession_VerifyFailed(t *testing.T) {
 	}
 	if mySync.called {
 		t.Fatal("expected mySiteSync not to be called on verify failure")
+	}
+}
+
+// TestRefreshAdminSession_RotatedSessionKeptWhenVerifyFails 覆盖：refresh 已换出新令牌但 VerifyAdmin 失败时，
+// 仍返回 ErrorAdminOnly，但新令牌已写回 store 并同步到 my_site_states，不会因旧 refresh token 失效而丢失登录。
+func TestRefreshAdminSession_RotatedSessionKeptWhenVerifyFails(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{
+		Platform: PlatformSub2API,
+		Identity: "admin@example.com",
+		Session:  authenticatedSession(),
+	})
+	rotated := upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: "https://example.com", AccessToken: "rotated-token", RefreshToken: "rotated-refresh"}
+	platform := &fakePlatformClient{refreshSessionResult: &rotated, verifyAdminErr: errors.New("verify request timed out")}
+	mySync := &fakeMySiteSync{}
+	service := newRefreshTestService(store, platform, mySync)
+
+	_, err := service.RefreshAdminSession(context.Background(), "user-1")
+	assertAdminOnlyError(t, err)
+
+	saved, _ := store.Get(context.Background(), "user-1", "account-1")
+	if saved == nil || saved.Session.AccessToken != "rotated-token" || saved.Session.RefreshToken != "rotated-refresh" {
+		t.Fatalf("expected rotated session to be saved before verification, got %+v", saved)
+	}
+	if !mySync.called || mySync.session.RefreshToken != "rotated-refresh" {
+		t.Fatalf("expected rotated session to be synced to my_site_states, got called=%v session=%+v", mySync.called, mySync.session)
 	}
 }
 

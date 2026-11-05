@@ -269,7 +269,9 @@ func (s *Service) Logout(ctx context.Context, userID string) error {
 // RefreshAdminSession 由前端主动触发，刷新当前 admin session 并重新校验 admin 身份。
 // 与 refreshIfNeeded（后台定时刷新，未变化时跳过校验）不同：这里无论 token 是否实际变化，
 // 都必须重新调用 VerifyAdmin，因为“更新管理员凭证”按钮的语义就是主动确认当前凭证仍然有效。
-// 刷新失败或校验失败统一返回 ErrorAdminOnly，不删除旧 session，让前端弹窗要求重新登录。
+// 刷新失败或校验失败统一返回 ErrorAdminOnly，不删除 session，让前端弹窗要求重新登录。
+// 刷新拿到新令牌时先保存再校验：Sub2API 每次刷新都会让旧 refresh token 失效，
+// 如果校验时网络抖动导致失败而不保存，新令牌就丢了，库里只剩已失效的旧令牌。
 func (s *Service) RefreshAdminSession(ctx context.Context, userID string) (StatusResponse, error) {
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
 	if err != nil {
@@ -287,20 +289,31 @@ func (s *Service) RefreshAdminSession(ctx context.Context, userID string) (Statu
 	if err != nil {
 		return StatusResponse{}, requestError(ErrorAdminOnly)
 	}
-	if err := s.platform.VerifyAdmin(refreshedSession); err != nil {
-		return StatusResponse{}, requestError(ErrorAdminOnly)
-	}
-
 	next := *record
 	next.Session = refreshedSession
 	next.LastRefreshedAt = nowMillis()
-	if err := s.store.Save(ctx, userID, adminAccountID, next); err != nil {
-		return StatusResponse{}, err
+	persist := func() error {
+		if err := s.store.Save(ctx, userID, adminAccountID, next); err != nil {
+			return err
+		}
+		// 同步写入 my_site_states，确保 RealConnect 等功能使用最新的 admin 会话
+		if s.mySiteSync != nil {
+			return s.mySiteSync.SyncAdminSession(ctx, userID, adminAccountID, next.Session, next.Identity)
+		}
+		return nil
 	}
 
-	// 同步写入 my_site_states，确保 RealConnect 等功能使用最新的 admin 会话
-	if s.mySiteSync != nil {
-		if err := s.mySiteSync.SyncAdminSession(ctx, userID, adminAccountID, next.Session, next.Identity); err != nil {
+	rotated := !sessionEqual(refreshedSession, record.Session)
+	if rotated {
+		if err := persist(); err != nil {
+			return StatusResponse{}, err
+		}
+	}
+	if err := s.platform.VerifyAdmin(refreshedSession); err != nil {
+		return StatusResponse{}, requestError(ErrorAdminOnly)
+	}
+	if !rotated {
+		if err := persist(); err != nil {
 			return StatusResponse{}, err
 		}
 	}
