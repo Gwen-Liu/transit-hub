@@ -461,6 +461,7 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	site.Status = StatusConnected
 	site.ErrorKey = nil
 	site.LastSyncedAt = &now
+	applyDiscoveredUserKeyAccount(site, dto.AuthMode, result.Session)
 
 	_ = s.setCachedSite(ctx, site)
 
@@ -508,6 +509,10 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 	site.Account = strings.TrimSpace(dto.Account)
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
 		site.Account = strings.TrimSpace(dto.UserID)
+		if site.Account == "" {
+			// 用户 ID 可选：留空时保留原值，重新登录成功后再用访问令牌识别出的用户 ID 回填。
+			site.Account = previousSite.Account
+		}
 	}
 	site.Remark = strings.TrimSpace(dto.Remark)
 	site.RechargeRate = dto.RechargeRate
@@ -551,6 +556,7 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		site.Status = StatusConnected
 		site.ErrorKey = nil
 		site.LastSyncedAt = &now
+		applyDiscoveredUserKeyAccount(site, dto.AuthMode, result.Session)
 
 		_ = s.setCachedSite(ctx, site)
 
@@ -607,6 +613,17 @@ func (s *Service) updateLogin(dto UpdateRequest) (LoginResult, error) {
 		return s.platformService.LoginWithUserKey(dto.SiteURL, dto.UserID, dto.AccessToken)
 	default:
 		return s.platformService.Login(dto.SiteURL, dto.Platform, dto.Account, dto.Password)
+	}
+}
+
+// applyDiscoveredUserKeyAccount 在访问令牌登录成功后，用会话里的用户 ID（用户填写或由令牌自动识别）
+// 作为站点账号展示，保证未填写用户 ID 时站点列表仍能看到所属用户。
+func applyDiscoveredUserKeyAccount(site *Site, authMode AuthMode, session Session) {
+	if normalizedAuthMode(authMode) != AuthModeUserKey {
+		return
+	}
+	if userID := strings.TrimSpace(session.UserID); userID != "" {
+		site.Account = userID
 	}
 }
 
@@ -1051,9 +1068,6 @@ func validateCreate(dto CreateRequest) error {
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
 		fields = append(fields, "accessToken")
 	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.UserID) == "" {
-		fields = append(fields, "userId")
-	}
 	if dto.RechargeRate <= 0 {
 		fields = append(fields, "rechargeRate")
 	}
@@ -1091,9 +1105,6 @@ func validateUpdate(dto UpdateRequest) error {
 	}
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
 		fields = append(fields, "accessToken")
-	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.UserID) == "" {
-		fields = append(fields, "userId")
 	}
 	if dto.RechargeRate <= 0 {
 		fields = append(fields, "rechargeRate")

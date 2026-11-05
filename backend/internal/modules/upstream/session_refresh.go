@@ -41,8 +41,9 @@ func (s *Service) freshSiteSession(ctx context.Context, id string, force bool) (
 	}
 	original := *site.Session
 	var refreshed Session
-	if force && original.Platform == PlatformSub2API && strings.TrimSpace(original.RefreshToken) != "" {
-		refreshed, err = s.platformService.refreshSub2APISession(original)
+	if force {
+		// Sub2API 与新版 new-api 都支持 refresh token；本进程已轮换过时直接拿到最新会话，不重放旧 token。
+		refreshed, err = s.platformService.ForceRefreshSession(original)
 	} else {
 		refreshed, err = s.platformService.RefreshSession(original)
 	}
@@ -52,7 +53,7 @@ func (s *Service) freshSiteSession(ctx context.Context, id string, force bool) (
 	if reflect.DeepEqual(refreshed, original) {
 		return refreshed, nil
 	}
-	// refreshSub2APISession 只重建登录字段，补回其它平台附加字段。
+	// 续期结果只重建登录字段，补回其它平台附加字段。
 	if refreshed.AdminAPIKey == "" {
 		refreshed.AdminAPIKey = original.AdminAPIKey
 	}
@@ -82,7 +83,7 @@ func (s *Service) withSiteSession(ctx context.Context, id string, fn func(Sessio
 		return Session{}, err
 	}
 	err = fn(session)
-	if err == nil || errorKey(err) != ErrorAuth || session.Platform != PlatformSub2API || strings.TrimSpace(session.RefreshToken) == "" {
+	if err == nil || errorKey(err) != ErrorAuth || strings.TrimSpace(session.RefreshToken) == "" {
 		return session, err
 	}
 	retried, refreshErr := s.freshSiteSession(ctx, id, true)

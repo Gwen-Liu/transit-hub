@@ -29,6 +29,9 @@ type requestOptions struct {
 	AccessToken string
 	TokenType   string
 	AdminAPIKey string
+	// Origin 只用于新版 new-api 的 refresh/logout Cookie 端点：Secure 模式下服务端会校验 Origin，
+	// 这里传入站点自身的 Origin，与浏览器在面板页上发起刷新时一致。
+	Origin string
 }
 
 type jsonResponse struct {
@@ -85,6 +88,9 @@ func (c *HTTPClient) requestJSONContext(ctx context.Context, reqURL string, opti
 
 	if options.UserID != "" {
 		req.Header.Set("New-Api-User", options.UserID)
+	}
+	if options.Origin != "" {
+		req.Header.Set("Origin", options.Origin)
 	}
 
 	response, err := c.client.Do(req)
