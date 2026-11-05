@@ -39,4 +39,4 @@
 3. 在获准的现有分支完成最小整合；旧定制只有在需求明确被替代或已被作者等价吸收且验证成立时退出。冲突或尚未采用的旧草稿差异保留为待处理证据，不静默选边。
 4. 执行后端 `go test -count=1 -timeout=3m ./...`、`go test -race -count=1 -timeout=3m ./...`、`go vet ./...`、`go build ./...`；前端 `npm run test:dashboard`、`npm run test:connections`、`npm run typecheck`、`npm run build`；根目录 `node scripts/verify-release.mjs` 与差异空白检查。真实 PostgreSQL 使用独立 `TEST_DATABASE_URL`，跳过不算集成通过；环境缺口不借生产依赖补测。
 5. 独立检查同一最终来源和全部直接消费者后，按闭包显式选择文件形成可审查提交，记录测试及未验证边界。`.local/`、`_skill-cache/`、本机状态、凭据、临时二进制与恢复包不进入公开提交；不要使用整树盲目提交。
-6. 发布继续以 `defaultAppVersion` 和现有发布一致性脚本/工作流为准，不套用其他项目的版本规则。提交、推送、发布、生产切换是不同动作；缺少对应授权时停在当前已完成层。撤销本次修复使用本次提交的反向补丁，不硬重置带有既有修改的工作树，不恢复旧数据库来撤回纯代码变更。
+6. 发布继续以 `defaultAppVersion` 和现有发布一致性脚本/工作流为准，不套用其他项目的版本规则；Release 正文（`docs/releases/vX.Y.Z.md`）按[发布说明怎么写](releases/README.md)的固定结构和模板写，提交信息与 Release 都不加 AI 署名。提交、推送、发布、生产切换是不同动作；缺少对应授权时停在当前已完成层。撤销本次修复使用本次提交的反向补丁，不硬重置带有既有修改的工作树，不恢复旧数据库来撤回纯代码变更。
