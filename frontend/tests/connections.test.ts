@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import ts from 'typescript'
 import * as vue from 'vue'
-import { connectionErrorKey, effectiveConnectionProtocol, inferredProtocols, protocolFromOwnGroups, recommendedFirst } from '../src/modules/admin/utils/connectionOptions.ts'
+import { accountPlatformId, connectionErrorKey, effectiveConnectionProtocol, inferredProtocols, protocolFromOwnGroups, recommendedFirst } from '../src/modules/admin/utils/connectionOptions.ts'
 
 const require = createRequire(import.meta.url)
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
@@ -75,6 +75,50 @@ test('协议推断、分组唯一平台与推荐排序工具函数', () => {
   assert.equal(effectiveConnectionProtocol('sub2api', '', '', capabilities, 'gemini'), '')
   assert.equal(effectiveConnectionProtocol('newapi', 'openai', '', capabilities, 'gemini'), 'gemini')
   assert.equal(effectiveConnectionProtocol('newapi', 'openai', 'anthropic', capabilities, 'gemini'), 'anthropic')
+  // Sub2API 上游分组自带的任何平台都直接作为协议；New API 厂商列表不是平台。
+  assert.equal(accountPlatformId(' Grok '), 'grok')
+  assert.equal(accountPlatformId('opencode_go'), 'opencode_go')
+  assert.equal(accountPlatformId('openai, anthropic'), '')
+  assert.equal(effectiveConnectionProtocol('sub2api', 'grok', 'openai', capabilities, ''), 'grok')
+  assert.equal(effectiveConnectionProtocol('sub2api', 'kimi', '', null, ''), 'kimi')
+  assert.equal(effectiveConnectionProtocol('newapi', 'grok', '', capabilities, ''), '')
+  assert.deepEqual(inferredProtocols('xAI, OpenAI', { ...capabilities, groupTypes: [...protocolOptions, { id: 'grok', name: 'Grok' }] }), ['grok', 'openai'])
+})
+
+test('Sub2API 上游的 Grok 等平台自动识别协议并只列同平台自有分组', async () => {
+  const groupTypes = [...protocolOptions, { id: 'grok', name: 'Grok' }]
+  const groups = [...ownGroups, { id: '5', platform: 'grok', groupName: 'Grok 生图', multiplier: 1 }, { id: '6', platform: 'kimi', groupName: 'Kimi', multiplier: 1 }]
+  const options = { ownGroups: groups, mappings: [], connectionCapabilities: { ...capabilities, groupTypes } }
+  for (const [platform, groupId, name] of [['grok', '5', 'Grok'], ['kimi', '6', 'kimi'], ['openai', '1', 'OpenAI']]) {
+    let payload: any
+    const f = fixture({
+      getMySiteMappingOptions: async () => options,
+      getUpstreamGroupProtocol: async () => ({ upstreamPlatform: 'sub2api', groupType: platform }),
+      realConnect: async (value: any) => { payload = value; return {} },
+    })
+    try {
+      await f.state.openConnector(rate(platform, 'sub2api'))
+      assert.equal(f.state.needsGroupTypeSelection.value, false)
+      assert.equal(f.state.effectiveGroupType.value, platform)
+      assert.equal(f.state.effectiveGroupTypeName.value, name)
+      assert.deepEqual(f.state.filteredOwnGroups.value.map((g: any) => g.id), [groupId])
+      f.state.toggleOwnGroup(groupId)
+      assert.equal(f.state.canSubmitConnect.value, true)
+      await f.state.submitConnector()
+      assert.equal(payload.groupType, platform)
+      assert.deepEqual(payload.ownGroupIds, [groupId])
+    } finally { f.stop() }
+  }
+  // 上游分组没有平台时才手选，选项里有 Grok，选中后只列 Grok 分组。
+  const f = fixture({ getMySiteMappingOptions: async () => options })
+  try {
+    await f.state.openConnector(rate(null, 'sub2api'))
+    assert.equal(f.state.needsGroupTypeSelection.value, true)
+    assert.ok(f.state.groupTypeOptions.value.some((option: any) => option.id === 'grok'))
+    assert.equal(f.state.filteredOwnGroups.value.length, 0)
+    f.state.selectedGroupType.value = 'grok'
+    assert.deepEqual(f.state.filteredOwnGroups.value.map((g: any) => g.id), ['5'])
+  } finally { f.stop() }
 })
 
 test('New API 上游先选分组、协议跟随分组，其他平台禁用并沿用同一 operationId', async () => {

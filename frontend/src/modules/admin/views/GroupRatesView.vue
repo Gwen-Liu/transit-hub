@@ -10,7 +10,7 @@ import { useGroupRates } from '../composables/useGroupRates'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
 import type { AdminResourceOption, ConnectionCapabilities, MySiteMapping, MySiteMappingOwnGroupOption, RealConnection, UpstreamKeyItem } from '../types/mySites'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
-import { connectionErrorKey, effectiveConnectionProtocol, inferredProtocols, knownConnectionProtocol, protocolFromOwnGroups, recommendedFirst } from '../utils/connectionOptions'
+import { accountPlatformId, connectionErrorKey, effectiveConnectionProtocol, inferredProtocols, knownConnectionProtocol, protocolFromOwnGroups, recommendedFirst } from '../utils/connectionOptions'
 
 const { t, locale } = useI18n()
 const router = useRouter()
@@ -166,7 +166,7 @@ const filteredOwnGroups = computed(() => {
   const upstreamType = effectiveGroupType.value
   if (connectionCapabilities.value?.requiresGroupType && !upstreamType) return []
   if (upstreamType) {
-    return ownGroups.value.filter(g => g.platform.toLowerCase() === upstreamType)
+    return ownGroups.value.filter(g => accountPlatformId(g.platform) === upstreamType)
   }
   return ownGroups.value
 })
@@ -290,9 +290,9 @@ const connectingGroupType = computed(() => upstreamGroupType.value || connecting
 const inferredGroupTypes = computed(() => isNewAPIUpstream.value ? inferredProtocols(connectingGroupType.value, connectionCapabilities.value) : [])
 const ownGroupProtocol = computed(() => protocolFromOwnGroups(connectOwnGroups.value, ownGroups.value, connectionCapabilities.value))
 const effectiveGroupType = computed(() => effectiveConnectionProtocol(connectingRate.value?.platform, connectingGroupType.value, selectedGroupType.value, connectionCapabilities.value, ownGroupProtocol.value))
-// 只有 Sub2API 上游且分组平台未知时才需要先选协议；New API 上游由所选分组决定协议。
+// 只有 Sub2API 上游且分组没有平台时才需要先选协议（grok 等任何平台都自动跟随）；New API 上游由所选分组决定协议。
 const needsGroupTypeSelection = computed(() => connectMode.value === 'real' && Boolean(connectionCapabilities.value?.requiresGroupType) &&
-  !isNewAPIUpstream.value && !knownConnectionProtocol(connectingGroupType.value, connectionCapabilities.value))
+  !isNewAPIUpstream.value && !accountPlatformId(connectingGroupType.value))
 const needsChannelTypeSelection = computed(() => connectMode.value === 'real' && Boolean(connectionCapabilities.value?.requiresChannelType))
 const usesOwnGroupProtocol = computed(() => isNewAPIUpstream.value && !isAdminNewAPI.value && Boolean(connectionCapabilities.value?.requiresGroupType))
 const effectiveGroupTypeName = computed(() => groupTypeOptions.value.find(option => option.id === effectiveGroupType.value)?.name ?? effectiveGroupType.value)

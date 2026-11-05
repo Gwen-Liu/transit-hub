@@ -2,10 +2,12 @@ package my_sites
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 )
 
 // 分组的模型厂商并不等于账号协议；能力响应与创建校验共用这一份定义。
+// 这里只列手动可选、并有专门建账号参数的协议；Sub2API 上游分组自带的其他平台另由 upstreamGroupPlatform 接受。
 type GroupTypeOption struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -24,6 +26,21 @@ var accountProtocols = []accountProtocol{
 	{GroupTypeOption{"anthropic", "Anthropic"}, 1000, true, "anthropic_passthrough", ""},
 	{GroupTypeOption{"gemini", "Gemini"}, 1000, true, "", "aistudio_free"},
 	{GroupTypeOption{"antigravity", "Antigravity"}, 10, false, "", ""},
+	// Sub2API 的 Grok API Key 账号同样走 base_url/api_key，并支持池模式。
+	{GroupTypeOption{"grok", "Grok"}, 1000, true, "", ""},
+}
+
+// accountPlatformPattern 是 Sub2API 平台标识的格式（如 grok、opencode_go）；逗号分隔的厂商列表不匹配。
+var accountPlatformPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// upstreamGroupPlatform 返回 Sub2API 上游分组自带的平台，任何合法平台标识都直接作为账号协议；
+// New API 上游的分组类型是模型厂商列表，不是平台，始终返回空。
+func upstreamGroupPlatform(cached string, newAPIUpstream bool) string {
+	cached = normalizeProtocolValue(cached)
+	if newAPIUpstream || !accountPlatformPattern.MatchString(cached) {
+		return ""
+	}
+	return cached
 }
 
 func findAccountProtocol(value string) (accountProtocol, bool) {
@@ -48,9 +65,11 @@ func normalizeProtocolValue(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-// validateRequestedGroupType 只校验显式选择本身是否为已发布协议，空值表示未选择。
-func validateRequestedGroupType(requested string) error {
-	if requested = normalizeProtocolValue(requested); requested == "" {
+// validateRequestedGroupType 校验显式选择：必须是已发布协议，或正是 Sub2API 上游分组自带的平台
+// （前端会把自动识别出的平台原样提交）；空值表示未选择。
+func validateRequestedGroupType(requested, upstreamPlatform string) error {
+	requested = normalizeProtocolValue(requested)
+	if requested == "" || (upstreamPlatform != "" && requested == upstreamPlatform) {
 		return nil
 	}
 	if _, ok := findAccountProtocol(requested); !ok {
@@ -60,14 +79,14 @@ func validateRequestedGroupType(requested string) error {
 }
 
 func resolveAccountGroupType(cached, requested string, newAPIUpstream bool) (string, error) {
-	cached = normalizeProtocolValue(cached)
+	platform := upstreamGroupPlatform(cached, newAPIUpstream)
 	requested = normalizeProtocolValue(requested)
-	if err := validateRequestedGroupType(requested); err != nil {
+	if err := validateRequestedGroupType(requested, platform); err != nil {
 		return "", err
 	}
-	// Sub2API 已知协议仍由其分组持有；New API 的厂商列表不等于协议，只认显式选择。
-	if _, ok := findAccountProtocol(cached); ok && !newAPIUpstream {
-		return cached, nil
+	// Sub2API 上游分组自带平台时由它决定协议（含 grok 等）；New API 的厂商列表不等于协议，只认显式选择。
+	if platform != "" {
+		return platform, nil
 	}
 	if requested != "" {
 		return requested, nil

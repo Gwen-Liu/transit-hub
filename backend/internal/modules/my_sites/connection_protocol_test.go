@@ -112,6 +112,10 @@ func TestRealConnectProtocolSelection(t *testing.T) {
 		{"newapi-mixed-own-groups", "openai, anthropic", "", "openai", "", ErrorOwnGroupPlatformMismatch, upstream.PlatformNewAPI, []string{"7", "8"}},
 		{"newapi-own-group-unknown-platform", "openai", "", "sora", "", ErrorGroupTypeRequired, upstream.PlatformNewAPI, nil},
 		{"newapi-invalid-selected", "openai", "injected-protocol", "openai", "", ErrorGroupTypeInvalid, upstream.PlatformNewAPI, nil},
+		{"newapi-grok-selected", "xai", "grok", "grok", "grok", "", upstream.PlatformNewAPI, nil},
+		{"newapi-grok-follows-own-group", "xai, openai", "", "grok", "grok", "", upstream.PlatformNewAPI, nil},
+		// New API 的厂商名不是平台：即使提交的值与之相同，也必须是已发布协议。
+		{"newapi-vendor-not-platform", "kimi", "kimi", "kimi", "", ErrorGroupTypeInvalid, upstream.PlatformNewAPI, nil},
 		{"sub2api-openai", "openai", "anthropic", "openai", "openai", "", upstream.PlatformSub2API, nil},
 		{"sub2api-anthropic", "anthropic", "", "anthropic", "anthropic", "", upstream.PlatformSub2API, nil},
 		{"sub2api-gemini", "gemini", "", "gemini", "gemini", "", upstream.PlatformSub2API, nil},
@@ -122,6 +126,13 @@ func TestRealConnectProtocolSelection(t *testing.T) {
 		{"sub2api-edited-snapshot-mismatch", "openai", "anthropic", "anthropic", "", ErrorOwnGroupPlatformMismatch, upstream.PlatformSub2API, nil},
 		{"sub2api-mixed-own-groups", "openai", "", "openai", "", ErrorOwnGroupPlatformMismatch, upstream.PlatformSub2API, []string{"7", "8"}},
 		{"sub2api-invalid-selected", "openai", "bad", "openai", "", ErrorGroupTypeInvalid, upstream.PlatformSub2API, nil},
+		// Sub2API 上游分组自带的平台都自动跟随，包括 grok 及未单独调参的平台；前端会把识别结果原样提交。
+		{"sub2api-grok", "grok", "", "grok", "grok", "", upstream.PlatformSub2API, nil},
+		{"sub2api-grok-submitted", " Grok ", "grok", "grok", "grok", "", upstream.PlatformSub2API, nil},
+		{"sub2api-unpublished-platform", "kimi", "kimi", "kimi", "kimi", "", upstream.PlatformSub2API, nil},
+		{"sub2api-unpublished-platform-mismatch", "kimi", "", "openai", "", ErrorOwnGroupPlatformMismatch, upstream.PlatformSub2API, nil},
+		{"sub2api-unpublished-other-selected", "kimi", "deepseek", "kimi", "", ErrorGroupTypeInvalid, upstream.PlatformSub2API, nil},
+		{"sub2api-unknown-selected-grok", "", "grok", "grok", "grok", "", upstream.PlatformSub2API, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newProtocolFixture(t, tc.source, upstream.PlatformSub2API, tc.cached)
@@ -148,18 +159,24 @@ func TestRealConnectProtocolSelection(t *testing.T) {
 			if f.payload["platform"] != tc.expected || f.payload["type"] != "apikey" || f.payload["priority"] != float64(1) || credentials["api_key"] != "test-key" || credentials["base_url"] == "" || !reflect.DeepEqual(f.payload["group_ids"], []any{float64(7)}) {
 				t.Fatalf("账号基础载荷不符: %v", f.payload)
 			}
+			_, published := findAccountProtocol(tc.expected)
 			wantConcurrency := float64(1000)
 			if tc.expected == "antigravity" {
 				wantConcurrency = 10
+			} else if !published {
+				wantConcurrency = 100
 			}
 			if f.payload["concurrency"] != wantConcurrency {
 				t.Fatalf("并发发生回归: %v", f.payload)
 			}
-			if tc.expected != "antigravity" && credentials["pool_mode"] != true {
+			if published && tc.expected != "antigravity" && credentials["pool_mode"] != true {
 				t.Fatal("pool_mode 丢失")
 			}
-			if tc.expected == "antigravity" && credentials["pool_mode"] != nil {
-				t.Fatal("antigravity 不应新增 pool_mode")
+			if (tc.expected == "antigravity" || !published) && credentials["pool_mode"] != nil {
+				t.Fatal("antigravity 与未单独调参的平台不应新增 pool_mode")
+			}
+			if tc.expected == "grok" && (f.payload["extra"] != nil || credentials["tier_id"] != nil) {
+				t.Fatalf("Grok 不应带其他协议的透传或 tier 参数: %v", f.payload)
 			}
 			if tc.expected == "gemini" && credentials["tier_id"] != "aistudio_free" {
 				t.Fatal("Gemini tier 丢失")
@@ -231,12 +248,30 @@ func TestRealBindMixedMetadataDoesNotRequireCreationProtocol(t *testing.T) {
 }
 
 func TestConnectionCapabilitiesPublishAccountProtocolContract(t *testing.T) {
-	want := []GroupTypeOption{{"openai", "OpenAI"}, {"anthropic", "Anthropic"}, {"gemini", "Gemini"}, {"antigravity", "Antigravity"}}
+	want := []GroupTypeOption{{"openai", "OpenAI"}, {"anthropic", "Anthropic"}, {"gemini", "Gemini"}, {"antigravity", "Antigravity"}, {"grok", "Grok"}}
 	if got := connectionCapabilities(upstream.PlatformSub2API); !reflect.DeepEqual(got.GroupTypes, want) || !got.RequiresGroupType {
 		t.Fatalf("协议能力不符: %+v", got)
 	}
 	if got := connectionCapabilities(upstream.PlatformNewAPI); got.RequiresGroupType || len(got.GroupTypes) != 0 || len(got.ChannelTypes) < 4 {
 		t.Fatalf("渠道能力回归: %+v", got)
+	}
+}
+
+func TestUpstreamGroupPlatformOnlyAcceptsSub2APIPlatformIdentifiers(t *testing.T) {
+	for _, tc := range []struct {
+		cached   string
+		newAPI   bool
+		expected string
+	}{
+		{" Grok ", false, "grok"},
+		{"opencode_go", false, "opencode_go"},
+		{"openai, anthropic", false, ""},
+		{"", false, ""},
+		{"grok", true, ""},
+	} {
+		if got := upstreamGroupPlatform(tc.cached, tc.newAPI); got != tc.expected {
+			t.Fatalf("upstreamGroupPlatform(%q, %v) = %q, want %q", tc.cached, tc.newAPI, got, tc.expected)
+		}
 	}
 }
 

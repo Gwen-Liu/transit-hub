@@ -16,7 +16,7 @@
 | Ticket/Lottery 嵌入身份绑定与撤销 | `tickets/`、`lottery/service.go` | 同模块身份、来源与会话撤销回归 |
 | 请求/响应预算与工作区调度隔离 | `backend/internal/shared/httpjson/`、`backend/internal/httpserver/server.go`、`settings/`、`upstream/service.go` | 请求/响应上限、`settings/strategy_workspace_test.go`、`upstream/refresh_scheduler_test.go` |
 | 真实对接幂等预留与补偿边界 | `my_sites/connection_service.go`、`repository.go`；迁移 `000019` | `my_sites/connection_idempotency_test.go`、`backend/internal/database/migrations/idempotency_migration_test.go` |
-| New API 对接协议跟随所选分组与错误边界 | `my_sites/connection_protocol.go`、`connection_service.go`、`handler.go`；前端 `GroupRatesView.vue` 与 `utils/connectionOptions.ts` | `my_sites/connection_protocol_test.go`；`frontend/tests/connections.test.ts`；[修复与验证记录](audits/2026-10-21-newapi-group-connection-fix.md) |
+| New API 对接协议跟随所选分组、Sub2API 上游分组平台（含 Grok）自动跟随与错误边界 | `my_sites/connection_protocol.go`、`connection_service.go`、`handler.go`；前端 `GroupRatesView.vue` 与 `utils/connectionOptions.ts` | `my_sites/connection_protocol_test.go`；`frontend/tests/connections.test.ts`；[修复与验证记录](audits/2026-10-21-newapi-group-connection-fix.md) |
 | 自然周/月、日结重试、后台成本采样、成本记录标志与跨日缓存 | `frontend/src/modules/admin/utils/dashboardMetrics.ts`；`dashboard/metrics_service.go`、`metrics_repository.go`；`upstream/daily_usage.go`、`session_refresh.go`、`stale_sync.go` | `frontend/tests/dashboardMetrics.test.ts`；dashboard日结/真实PG测试；`upstream/daily_usage_test.go`、`sync_resilience_test.go`；[修复与恢复边界](audits/2026-10-22-dashboard-daily-settlement.md)、[成本记录丢失修复](audits/2026-10-29-cost-capture-and-bug-sweep.md) |
 | Fork 部署来源与发布版本一致性 | `backend/internal/config/config.go`、`scripts/verify-release.mjs`、`.github/workflows/release.yml` | `node scripts/verify-release.mjs` 与发布工作流 |
 

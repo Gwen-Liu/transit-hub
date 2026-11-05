@@ -119,7 +119,7 @@ func (s *Service) prepareConnectionContext(ctx context.Context, userID, siteID, 
 	groupType := cachedGroupType
 	if requireAdminResourceType && state.Session.Platform == upstream.PlatformSub2API {
 		// 账号协议需要结合所选自有分组的平台才能最终确定，这里只提前拒绝非法显式选择。
-		if err := validateRequestedGroupType(requestedType); err != nil {
+		if err := validateRequestedGroupType(requestedType, upstreamGroupPlatform(cachedGroupType, upstreamSite.Session.Platform == upstream.PlatformNewAPI)); err != nil {
 			return connectionContext{}, err
 		}
 		groupType = ""

@@ -6,8 +6,16 @@ export const knownConnectionProtocol = (value: string | null | undefined, capabi
   return capabilities?.groupTypes?.some(option => option.id === normalized) ? normalized : ''
 }
 
+// Sub2API 上游分组自带的平台（如 grok、opencode_go）直接作为协议，与后端 accountPlatformPattern 一致；
+// 逗号分隔的 New API 厂商列表不匹配。
+const accountPlatformPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/
+export const accountPlatformId = (value: string | null | undefined): string => {
+  const normalized = (value ?? '').trim().toLowerCase()
+  return accountPlatformPattern.test(normalized) ? normalized : ''
+}
+
 // 少数常见厂商名与协议名不同；只用于推荐排序，不参与创建校验。
-const vendorProtocolAliases: Record<string, string> = { google: 'gemini', claude: 'anthropic' }
+const vendorProtocolAliases: Record<string, string> = { google: 'gemini', claude: 'anthropic', xai: 'grok' }
 
 // New API 分组类型是逗号分隔的模型厂商列表，只保留能力中发布的协议，作为推荐而非限制。
 export const inferredProtocols = (vendors: string | null | undefined, capabilities: ConnectionCapabilities | null): string[] => {
@@ -41,7 +49,7 @@ export const recommendedFirst = <T extends { platform: string }>(groups: readonl
   return [...groups].sort((a, b) => Number(isRecommended(b)) - Number(isRecommended(a)))
 }
 
-// Sub2API 上游的已知分组平台决定协议；New API 上游先选分组，显式选择优先，否则跟随所选分组的唯一平台。
+// Sub2API 上游分组自带的平台决定协议（不限于手动可选的几种）；New API 上游先选分组，显式选择优先，否则跟随所选分组的唯一平台。
 export const effectiveConnectionProtocol = (
   platform: string | null | undefined,
   cached: string | null | undefined,
@@ -49,8 +57,8 @@ export const effectiveConnectionProtocol = (
   capabilities: ConnectionCapabilities | null,
   ownGroupProtocol = '',
 ): string => {
-  const known = knownConnectionProtocol(cached, capabilities)
-  if (platform !== 'newapi' && known) return known
+  const upstreamPlatform = accountPlatformId(cached)
+  if (platform !== 'newapi' && upstreamPlatform) return upstreamPlatform
   const explicit = knownConnectionProtocol(selected, capabilities)
   if (explicit || platform !== 'newapi') return explicit
   return knownConnectionProtocol(ownGroupProtocol, capabilities)

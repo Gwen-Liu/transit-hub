@@ -46,3 +46,11 @@
 - 本机未配置独立 `TEST_DATABASE_URL`，本轮数据库跳过不算集成通过。未借用生产数据库、真实站点账号或令牌；本地模拟适配和浏览器夹具不代表用户真实站点已对接成功。
 - 源码和本地提交与生产更新分开。本次只完成本地修复、文档和版本管理；实际发布或真实站点验收需后续单独进行。
 - 代码回滚使用本次修复提交的 `git revert`；不硬重置工作树、不回滚数据库、不撤掉此前HTTP兼容提交。提交身份由Git历史持有，本机当前交付状态由 `CURRENT_STATE.md` 持有。
+
+## 补充（2026-11-04）：Sub2API 上游分组平台自动跟随与 Grok
+
+- 用户反馈：对接上游 Sub2API 的“grok 生图”分组时，弹窗要求手选协议，而选项只有 OpenAI/Anthropic/Gemini/Antigravity，无法对接；期望像以前一样按上游分组自动选协议并筛出同平台自有分组。
+- 原因：本次 New API 修复把 Sub2API 上游的协议也限制为四个已发布协议，上游分组平台为 `grok` 等其他 Sub2API 平台时被当作未知，回退为手选。修复前的行为是直接沿用上游分组平台。
+- 修复：`connection_protocol.go` 的 `upstreamGroupPlatform` 与前端 `accountPlatformId` 用同一平台标识格式，Sub2API 上游分组自带的任何平台都直接作为账号协议，前端提交该值也被接受；自有分组仍必须同平台。New API 上游的厂商列表仍不当协议，原“先选自有分组、协议跟随分组”不变。
+- 已发布协议新增 Grok（并发 1000、池模式，无透传/tier），可手选；New API 厂商名 `xAI` 推荐为 Grok。其他未单独调参的平台沿用原通用载荷（平台原值、并发 100）。
+- 验证：`connection_protocol_test.go` 新增 Grok、未调参平台、New API 厂商边界等用例；`frontend/tests/connections.test.ts` 新增 Grok/Kimi/OpenAI 自动识别与无平台手选 Grok。后端全量测试、vet、build，前端 connections 18 项、dashboard 29 项、typecheck、build 通过；未连接真实站点或生产。
