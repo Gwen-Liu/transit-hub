@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/redis/go-redis/v9"
+
+	"transithub/backend/internal/shared/secretbox"
 )
 
 // Redis key 约定：
@@ -32,12 +34,26 @@ type SiteCache interface {
 // RedisSiteCache 使用 Redis 存储上游站点运行时状态。
 // Site 结构体的 UserID 和 Session 字段标记了 json:"-"，
 // 因此使用 sitePayload 包装结构绕过标签限制，保证完整序列化。
+//
+// 站点的登录状态在 Redis 里同样加密保存（Redis 会持久化到磁盘），放在 sealedSession 字段。
+// 缓存每次启动都会清空并从 PostgreSQL 重新装入，所以不会留下加密之前写入的明文。
 type RedisSiteCache struct {
-	client *redis.Client
+	client  *redis.Client
+	secrets *secretbox.Box
 }
 
 func NewRedisSiteCache(client *redis.Client) *RedisSiteCache {
 	return &RedisSiteCache{client: client}
+}
+
+// SetSecretBox 设置加密登录状态用的密钥（nil 表示不加密）。要在读写之前设置。
+func (c *RedisSiteCache) SetSecretBox(box *secretbox.Box) {
+	c.secrets = box
+}
+
+// siteCacheAAD 把缓存里的密文绑定到上游站点（id 不会变）。
+func siteCacheAAD(siteID string) string {
+	return "upstream_site_cache/" + siteID
 }
 
 // sitePayload 是 Site 在 Redis 中的序列化格式。
@@ -60,6 +76,47 @@ type sitePayload struct {
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
 	Session           *Session     `json:"session,omitempty"`
+	// SealedSession 是加密后的 Session（配置了密钥时使用，此时 Session 留空）。
+	SealedSession string `json:"sealedSession,omitempty"`
+}
+
+// encode 序列化站点；配置了密钥时把登录状态加密后放进 sealedSession。
+func (c *RedisSiteCache) encode(site *Site) ([]byte, error) {
+	p := toPayload(site)
+	if c.secrets != nil && p.Session != nil {
+		plain, err := json.Marshal(p.Session)
+		if err != nil {
+			return nil, err
+		}
+		sealed, err := c.secrets.Seal(plain, siteCacheAAD(site.ID))
+		if err != nil {
+			return nil, err
+		}
+		p.Session = nil
+		p.SealedSession = sealed
+	}
+	return json.Marshal(p)
+}
+
+// decode 解析站点；sealedSession 读不出来（例如密钥换了）时当作未登录。
+func (c *RedisSiteCache) decode(raw string) (*Site, error) {
+	var p sitePayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, err
+	}
+	if p.SealedSession != "" {
+		plain, err := c.secrets.Open(p.SealedSession, siteCacheAAD(p.ID))
+		if err != nil {
+			secretbox.LogUnreadable(siteCacheAAD(p.ID)+" (redis)", err)
+		} else {
+			var session Session
+			if err := json.Unmarshal(plain, &session); err != nil {
+				return nil, err
+			}
+			p.Session = &session
+		}
+	}
+	return fromPayload(p), nil
 }
 
 func toPayload(site *Site) sitePayload {
@@ -121,17 +178,13 @@ func (c *RedisSiteCache) Get(ctx context.Context, id string) (*Site, error) {
 		}
 		return nil, err
 	}
-	var p sitePayload
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return nil, err
-	}
-	return fromPayload(p), nil
+	return c.decode(raw)
 }
 
 // Set 写入站点到 Redis，同时把站点 ID 添加到该用户的站点集合中。
 // 使用 Pipeline 保证两个操作在同一个 RTT 完成。
 func (c *RedisSiteCache) Set(ctx context.Context, site *Site) error {
-	payload, err := json.Marshal(toPayload(site))
+	payload, err := c.encode(site)
 	if err != nil {
 		return err
 	}
@@ -186,11 +239,11 @@ func (c *RedisSiteCache) ListByUser(ctx context.Context, userID string) ([]*Site
 			}
 			return nil, err
 		}
-		var p sitePayload
-		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		site, err := c.decode(raw)
+		if err != nil {
 			return nil, err
 		}
-		sites = append(sites, fromPayload(p))
+		sites = append(sites, site)
 	}
 	return sites, nil
 }

@@ -33,6 +33,9 @@ ENV PUBLIC_DIR=/app/public
 # 不会被当作公开静态资源暴露；docker-compose.prod.yml 需要把这个路径挂载成持久化 volume，
 # 否则容器重建后数据库里的附件 metadata 还在但图片文件会丢失。
 ENV TICKET_UPLOAD_DIR=/app/data/ticket-uploads
+# 应用数据目录：没有设置 CREDENTIAL_ENCRYPTION_KEY 时，凭据加密密钥 credential.key 自动生成在这里。
+# 只有把 /app/data 挂载成持久卷才会自动生成；否则凭据继续明文保存，启动日志会提示。
+ENV DATA_DIR=/app/data
 EXPOSE 10621
 
 ENTRYPOINT ["/app/transithub-api"]

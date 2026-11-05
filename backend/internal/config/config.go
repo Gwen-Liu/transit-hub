@@ -21,6 +21,9 @@ type Config struct {
 	RedisURL    string
 	CORSOrigins []string
 	PublicDir   string // 前端静态文件目录，生产默认 /app/public
+	// 应用自己的数据目录（镜像里是 /app/data）：没有设置 CREDENTIAL_ENCRYPTION_KEY 时，凭据加密密钥
+	// credential.key 自动生成在这里，所以它需要是持久卷；不是持久卷时凭据继续明文保存。
+	DataDir string
 
 	// 初始化管理员
 	AdminEmail    string
@@ -50,6 +53,10 @@ type Config struct {
 	// SMTP 密码加密密钥：base64 编码的 32 字节 AES-256-GCM key，由 settings 模块解析和校验。
 	// 应用启动时是可选项，缺失不影响启动；这里只原样读取环境变量原值，不做任何解析或校验。
 	SMTPEncryptionKey string
+
+	// 登录凭据（站点会话、上游登录状态、机器人密钥）的加密密钥：base64 编码的 32 字节。
+	// 可选：不设置时用数据目录里自动生成的 credential.key（数据目录需要是持久卷）。由 secretbox 解析。
+	CredentialEncryptionKey string
 }
 
 func Load() Config {
@@ -66,6 +73,7 @@ func Load() Config {
 		RedisURL:    envOrDefault("REDIS_URL", defaultRedisURL),
 		CORSOrigins: splitOrigins(os.Getenv("CORS_ORIGINS")),
 		PublicDir:   envOrDefault("PUBLIC_DIR", defaultPublicDir),
+		DataDir:     envOrDefault("DATA_DIR", "data"),
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
@@ -85,6 +93,8 @@ func Load() Config {
 		TicketUploadDir: envOrDefault("TICKET_UPLOAD_DIR", "data/ticket-uploads"),
 
 		SMTPEncryptionKey: os.Getenv("SMTP_ENCRYPTION_KEY"),
+
+		CredentialEncryptionKey: os.Getenv("CREDENTIAL_ENCRYPTION_KEY"),
 	}
 }
 

@@ -35,6 +35,11 @@ services:
       # 缺失不影响应用启动，也不影响 SMTP 之外的功能。用 `openssl rand -base64 32` 生成一个 base64 编码的
       # 32 字节随机值；生成后必须长期稳定保存——更换 key 后，旧的 SMTP 密码密文将无法解密，需要重新填写密码。
       # SMTP_ENCRYPTION_KEY: change-this-to-a-generated-base64-32-byte-key
+      # 推荐：登录凭据加密密钥。设置后，站点会话、上游登录状态（含 Admin Key）、对接记录里的上游 Key
+      # 和通知机器人密钥都加密保存，只拿到数据库或 Redis 备份看不到这些凭据。用 `openssl rand -base64 32`
+      # 生成；必须和数据库备份一起长期保存——密钥丢了，已保存的登录都要重新填写。不设置且 /app/data
+      # 不是持久卷时，凭据继续明文保存。
+      # CREDENTIAL_ENCRYPTION_KEY: change-this-to-a-generated-base64-32-byte-key
     volumes:
       # 持久化工单图片附件；不要挂载到 /app/public 之下，避免变成公开静态目录。
       - ../data/ticket-uploads:/app/data/ticket-uploads

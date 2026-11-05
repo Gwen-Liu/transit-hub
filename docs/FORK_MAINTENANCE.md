@@ -42,10 +42,17 @@
 | `b680019` 删除 `GET /api/users` | `backend/internal/httpserver/server.go`；`users` 模块已删除 | 无（接口与模块已不存在） |
 | `e3ca89b` 中的 New API 本站营收与分组用量改用全站 `/api/log/stat` | `upstream/daily_usage.go`、`platform_service.go`；上游消费仍用 `/api/log/self/stat` | `upstream/daily_usage_test.go`、`platform_service_group_daily_stats_test.go` |
 | `1f07c9d` 兼容迁移遵守 search_path，Fork 的 `000019` 同样处理 | 迁移 `000016`、`000018`、`000019` | `backend/internal/database/migrations/runner_postgres_test.go`（需 `TEST_DATABASE_URL`） |
+| `e9a91e1` 新版 new-api 鉴权（短期 JWT、刷新 Cookie 轮换、个人访问令牌、用户 ID 可选、二次验证提示）与进程内刷新合并 | `upstream/newapi_auth.go`、`session_refresher.go`、`platform_service.go`；`dashboard/service.go`；前端 `AdminLoginModal.vue`、`UpstreamView.vue` | `upstream/newapi_auth_test.go`、`session_refresh_newapi_test.go`；`dashboard/service_newapi_auth_test.go` |
+| `9d631fd` 凭据静态加密（AES-256-GCM，密文绑定存储位置） | `backend/internal/shared/secretbox/`、`shared/datadir/`；`upstream/repository.go`、`site_cache.go`；`my_sites/repository.go`；`dashboard/repository.go`；`settings/repository.go`；`backend/internal/httpserver/server.go` | `backend/internal/credentialstest/`（需 `TEST_DATABASE_URL`，Redis 部分需 `TEST_REDIS_URL`）；`upstream/site_cache_secret_test.go`、`my_sites/repository_secret_test.go` |
+
+移植时的 Fork 差异：
+- 会话写回沿用 Fork 的 `upstream/session_refresh.go`（同站点加锁、刷新后立即写回），不采用作者的 `writeBackRefreshedSession`；遇到 401 的强制续期扩展到 new-api，并经过进程内刷新合并，不重放已轮换的 refresh token。
+- 凭据加密额外覆盖作者没有的上游站点 Redis 缓存（`sealedSession` 字段）和对接记录 `real_connections.upstream_key`；自有站会话解不开时只清空会话、保留分组映射（自动调价依赖它）。作者的出站代理加密与版本弹窗提示不移植（Fork 没有这两个功能），改为启动日志提示。
+- `shared/datadir` 的路径清理改用 `path.Clean`，让测试在 Windows 上也能运行；Linux 上行为不变。数据目录配置为 `DATA_DIR`，默认 `data`，镜像中为 `/app/data`。
 
 Fork 自己补的同类修复：`dashboard/service.go` 的 `RefreshAdminSession` 刷新出新令牌时先保存再校验，避免校验失败时丢失已轮换的令牌（对应作者 `e9a91e1` 的会话轮换部分），回归入口 `dashboard/service_refresh_test.go`。
 
-待移植：`e9a91e1` 新版 new-api 鉴权（短期 JWT、刷新令牌轮换、个人访问令牌）；`9d631fd` 凭据静态加密（需先定密钥管理与备份）。不移植：在线更新（下载地址写死作者仓库）、TransitLink 客户端配置与工单。
+待移植：暂无。不移植：在线更新（下载地址写死作者仓库）、TransitLink 客户端配置与工单、出站代理。
 
 ## 更新作者版本时的最小流程
 

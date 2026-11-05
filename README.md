@@ -148,6 +148,14 @@ openssl rand -base64 32
 
 This must be a base64-encoded 32-byte value, and it must be kept stable long-term once set. Rotating the key makes any previously saved SMTP password ciphertext undecryptable, requiring the password to be re-entered and saved.
 
+### Credential encryption
+
+Saved credentials can be encrypted at rest: your own site's admin session (PostgreSQL and its Redis copy), upstream logins (cookies, tokens and Admin Keys, in PostgreSQL and Redis), upstream keys saved with connections, and notification bot secrets. With encryption on, a database dump or backup alone does not reveal them.
+
+- Set `CREDENTIAL_ENCRYPTION_KEY` (a base64-encoded 32-byte value, `openssl rand -base64 32`). Without it, a `credential.key` is generated on first start in `DATA_DIR` (`/app/data` in the image) if that directory is a persistent volume; otherwise credentials stay unencrypted and the startup log says so.
+- Keep the key together with your `data/postgres` backups. Without it, saved credentials can't be read, and you'd have to log in to your sites and re-enter bot settings again.
+- Credentials saved by earlier versions keep working and are encrypted automatically about a minute after startup. Once encrypted, going back to a version without encryption requires logging in to your sites again.
+
 ### Development Services
 
 For local development dependencies only:

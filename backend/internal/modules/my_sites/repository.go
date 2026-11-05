@@ -10,17 +10,34 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/secretbox"
 )
 
 // StateMutation mutates the locked latest my_site_states row before it is saved in the same transaction.
 type StateMutation func(*State) error
 
 type Repository struct {
-	db *pgxpool.Pool
+	db      *pgxpool.Pool
+	secrets *secretbox.Box
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
+}
+
+// SetSecretBox 设置加密会话和上游 Key 用的密钥（nil 表示不加密）。要在读写之前设置。
+func (r *Repository) SetSecretBox(box *secretbox.Box) {
+	r.secrets = box
+}
+
+// sessionAAD 把会话密文绑定到所属用户。不绑定工作区：旧版本的行在补齐工作区时会改 admin_account_id。
+func sessionAAD(userID string) string {
+	return "my_site_states/" + userID
+}
+
+// upstreamKeyAAD 把对接记录里的上游 Key 密文绑定到这条记录（id 不会变）。
+func upstreamKeyAAD(connectionID string) string {
+	return "real_connections/" + connectionID
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -125,14 +142,14 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 }
 
 func (r *Repository) Get(ctx context.Context, userID string, adminAccountID string) (*State, error) {
-	return scanState(r.db.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2`, userID, adminAccountID))
+	return r.scanState(r.db.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2`, userID, adminAccountID))
 }
 
 type stateScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanState(row stateScanner) (*State, error) {
+func (r *Repository) scanState(row stateScanner) (*State, error) {
 	var state State
 	var sessionJSON []byte
 	var mappingsJSON []byte
@@ -143,7 +160,10 @@ func scanState(row stateScanner) (*State, error) {
 		}
 		return nil, err
 	}
-	if err := json.Unmarshal(sessionJSON, &state.Session); err != nil {
+	if plain, err := r.secrets.OpenJSON(sessionJSON, sessionAAD(state.UserID)); err != nil {
+		// 读不出来（例如密钥换了）：只当作没有保存会话、提示重新登录站点；分组映射照常保留。
+		secretbox.LogUnreadable(sessionAAD(state.UserID)+"/"+state.AdminAccountID, err)
+	} else if err := json.Unmarshal(plain, &state.Session); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(mappingsJSON, &state.Mappings); err != nil {
@@ -155,8 +175,12 @@ func scanState(row stateScanner) (*State, error) {
 	return &state, nil
 }
 
-func marshalStateJSON(state State) (sessionJSON, mappingsJSON, ownGroupsJSON []byte, err error) {
+func (r *Repository) marshalStateJSON(state State) (sessionJSON, mappingsJSON, ownGroupsJSON []byte, err error) {
 	sessionJSON, err = json.Marshal(state.Session)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sessionJSON, err = r.secrets.SealJSON(sessionJSON, sessionAAD(state.UserID))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -172,7 +196,7 @@ func marshalStateJSON(state State) (sessionJSON, mappingsJSON, ownGroupsJSON []b
 }
 
 func (r *Repository) Save(ctx context.Context, state State) error {
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state)
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := r.marshalStateJSON(state)
 	if err != nil {
 		return err
 	}
@@ -194,6 +218,10 @@ func (r *Repository) Save(ctx context.Context, state State) error {
 // 避免令牌刷新或登录同步用请求开始时读到的旧映射覆盖并发保存的新映射。
 func (r *Repository) SaveSession(ctx context.Context, userID, adminAccountID, baseURL, email string, session upstream.Session) error {
 	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	sessionJSON, err = r.secrets.SealJSON(sessionJSON, sessionAAD(userID))
 	if err != nil {
 		return err
 	}
@@ -223,7 +251,7 @@ func (r *Repository) MutateState(ctx context.Context, userID string, adminAccoun
 		}
 	}()
 
-	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
+	state, err := r.scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +261,7 @@ func (r *Repository) MutateState(ctx context.Context, userID string, adminAccoun
 	if err := mutate(state); err != nil {
 		return nil, err
 	}
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := r.marshalStateJSON(*state)
 	if err != nil {
 		return nil, err
 	}
@@ -266,6 +294,10 @@ func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection
 	if err != nil {
 		return err
 	}
+	sealedKey, err := r.sealUpstreamKey(conn)
+	if err != nil {
+		return err
+	}
 	_, err = r.db.Exec(ctx, `
 		INSERT INTO real_connections (
 			id, user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id,
@@ -275,7 +307,7 @@ func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
 	`, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.UpstreamGroupID, conn.UpstreamGroupName,
-		conn.UpstreamKeyID, conn.UpstreamKey, conn.AdminAccountID, conn.AdminAccountName,
+		conn.UpstreamKeyID, sealedKey, conn.AdminAccountID, conn.AdminAccountName,
 		string(ownGroupIDsJSON), string(ownGroupNamesJSON), conn.GroupType, conn.ProvisioningMode,
 		conn.Status, conn.UpstreamPlatform, conn.AdminPlatform, conn.PricingMappingEnabled, conn.OperationID, conn.CreatedAt)
 	return err
@@ -297,7 +329,7 @@ func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, c
 	}()
 
 	if conn.PricingMappingEnabled {
-		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		state, err := r.scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
 		if err != nil {
 			return err
 		}
@@ -305,12 +337,12 @@ func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, c
 			return fmt.Errorf("save real connection: workspace state not found")
 		}
 		addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-		if err := updateStateInTx(ctx, tx, *state); err != nil {
+		if err := r.updateStateInTx(ctx, tx, *state); err != nil {
 			return err
 		}
 	}
 
-	if err := insertRealConnection(ctx, tx, conn); err != nil {
+	if err := r.insertRealConnection(ctx, tx, conn); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -320,12 +352,16 @@ func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, c
 	return nil
 }
 
-func insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection) error {
+func (r *Repository) insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection) error {
 	ownGroupIDsJSON, err := json.Marshal(conn.OwnGroupIDs)
 	if err != nil {
 		return err
 	}
 	ownGroupNamesJSON, err := json.Marshal(conn.OwnGroupNames)
+	if err != nil {
+		return err
+	}
+	sealedKey, err := r.sealUpstreamKey(conn)
 	if err != nil {
 		return err
 	}
@@ -338,14 +374,14 @@ func insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection) e
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
 	`, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.UpstreamGroupID, conn.UpstreamGroupName,
-		conn.UpstreamKeyID, conn.UpstreamKey, conn.AdminAccountID, conn.AdminAccountName,
+		conn.UpstreamKeyID, sealedKey, conn.AdminAccountID, conn.AdminAccountName,
 		string(ownGroupIDsJSON), string(ownGroupNamesJSON), conn.GroupType, conn.ProvisioningMode,
 		conn.Status, conn.UpstreamPlatform, conn.AdminPlatform, conn.PricingMappingEnabled, conn.OperationID, conn.CreatedAt)
 	return err
 }
 
-func updateStateInTx(ctx context.Context, tx pgx.Tx, state State) error {
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state)
+func (r *Repository) updateStateInTx(ctx context.Context, tx pgx.Tx, state State) error {
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := r.marshalStateJSON(state)
 	if err != nil {
 		return err
 	}
@@ -421,7 +457,15 @@ const realConnectionSelectSQL = `
 	       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
 	FROM real_connections`
 
-func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
+// sealUpstreamKey 加密对接记录里的上游 Key；空值保持为空。
+func (r *Repository) sealUpstreamKey(conn RealConnection) (string, error) {
+	if conn.UpstreamKey == "" {
+		return "", nil
+	}
+	return r.secrets.Seal([]byte(conn.UpstreamKey), upstreamKeyAAD(conn.ID))
+}
+
+func (r *Repository) scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
 	var conn RealConnection
 	var ownGroupIDsJSON []byte
 	var ownGroupNamesJSON []byte
@@ -435,6 +479,13 @@ func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
 		&conn.PricingMappingEnabled, &conn.OperationID, &createdAt,
 	); err != nil {
 		return nil, err
+	}
+	if key, err := r.secrets.Open(conn.UpstreamKey, upstreamKeyAAD(conn.ID)); err != nil {
+		// 读不出来（例如密钥换了）：当作没有保存 Key，探活等功能会提示凭据不可用。
+		secretbox.LogUnreadable(upstreamKeyAAD(conn.ID), err)
+		conn.UpstreamKey = ""
+	} else {
+		conn.UpstreamKey = string(key)
 	}
 	if err := json.Unmarshal(ownGroupIDsJSON, &conn.OwnGroupIDs); err != nil {
 		return nil, err
@@ -463,7 +514,7 @@ func (r *Repository) ListRealConnections(ctx context.Context, userID string, adm
 
 	var connections []RealConnection
 	for rows.Next() {
-		conn, err := scanRealConnection(rows)
+		conn, err := r.scanRealConnection(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +532,7 @@ func (r *Repository) GetRealConnection(ctx context.Context, id string, userID st
 		       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
 		FROM real_connections WHERE id = $1 AND user_id = $2 AND workspace_admin_account_id = $3
 	`, id, userID, adminAccountID)
-	conn, err := scanRealConnection(row)
+	conn, err := r.scanRealConnection(row)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -504,7 +555,7 @@ func (r *Repository) GetRealConnectionByOperationID(ctx context.Context, userID 
 		       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
 		FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 AND operation_id = $3
 	`, userID, adminAccountID, operationID)
-	conn, err := scanRealConnection(row)
+	conn, err := r.scanRealConnection(row)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -568,7 +619,7 @@ func (r *Repository) ReserveRealConnectionOperation(ctx context.Context, userID,
 		}
 	}
 	if op.Status == RealConnectionOperationSucceeded {
-		conn, err := scanRealConnection(tx.QueryRow(ctx, realConnectionSelectSQL+` WHERE user_id = $1 AND workspace_admin_account_id = $2 AND operation_id = $3`, userID, adminAccountID, operationID))
+		conn, err := r.scanRealConnection(tx.QueryRow(ctx, realConnectionSelectSQL+` WHERE user_id = $1 AND workspace_admin_account_id = $2 AND operation_id = $3`, userID, adminAccountID, operationID))
 		if err == pgx.ErrNoRows {
 			// 连接已被取消对接删除：同一意图（如未传 operationId 时由请求内容派生的标识）允许重新创建。
 			if _, err := tx.Exec(ctx, `
@@ -688,7 +739,7 @@ func (r *Repository) CompleteRealConnectionOperation(ctx context.Context, userID
 		return ErrRealConnectionOperationNotOwner
 	}
 	if conn.PricingMappingEnabled {
-		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		state, err := r.scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
 		if err != nil {
 			return err
 		}
@@ -696,11 +747,11 @@ func (r *Repository) CompleteRealConnectionOperation(ctx context.Context, userID
 			return fmt.Errorf("save real connection: workspace state not found")
 		}
 		addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-		if err := updateStateInTx(ctx, tx, *state); err != nil {
+		if err := r.updateStateInTx(ctx, tx, *state); err != nil {
 			return err
 		}
 	}
-	if err := insertRealConnection(ctx, tx, conn); err != nil {
+	if err := r.insertRealConnection(ctx, tx, conn); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -769,13 +820,13 @@ func (r *Repository) DeleteRealConnectionWithPricingMapping(ctx context.Context,
 			return err
 		}
 		if !shared {
-			state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+			state, err := r.scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
 			if err != nil {
 				return err
 			}
 			if state != nil {
 				removeMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-				if err := updateStateInTx(ctx, tx, *state); err != nil {
+				if err := r.updateStateInTx(ctx, tx, *state); err != nil {
 					return err
 				}
 			}
@@ -808,13 +859,13 @@ func (r *Repository) RemoveUpstreamMappingAndDeleteConnection(ctx context.Contex
 		}
 	}()
 
-	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
+	state, err := r.scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
 	if err != nil {
 		return err
 	}
 	if state != nil {
 		removeMappingTargetFromState(state, siteID, groupName)
-		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+		sessionJSON, mappingsJSON, ownGroupsJSON, err := r.marshalStateJSON(*state)
 		if err != nil {
 			return err
 		}
@@ -843,4 +894,89 @@ func (r *Repository) RemoveUpstreamMappingAndDeleteConnection(ctx context.Contex
 	}
 	committed = true
 	return nil
+}
+
+// EncryptLegacySessions 把加密之前保存的明文会话改成加密保存，返回改了几行。
+// 只改仍是明文、且期间没被改过的行（同时有新会话写入时以新会话为准）。
+func (r *Repository) EncryptLegacySessions(ctx context.Context) (int, error) {
+	if r.secrets == nil {
+		return 0, nil
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT user_id, admin_account_id, session::text FROM my_site_states WHERE jsonb_typeof(session) = 'object'
+	`)
+	if err != nil {
+		return 0, err
+	}
+	type legacyRow struct{ userID, adminAccountID, session string }
+	var legacy []legacyRow
+	for rows.Next() {
+		var row legacyRow
+		if err := rows.Scan(&row.userID, &row.adminAccountID, &row.session); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		legacy = append(legacy, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, row := range legacy {
+		sealed, err := r.secrets.SealJSON([]byte(row.session), sessionAAD(row.userID))
+		if err != nil {
+			return changed, err
+		}
+		tag, err := r.db.Exec(ctx, `
+			UPDATE my_site_states SET session = $1::jsonb
+			WHERE user_id = $2 AND admin_account_id = $3 AND session = $4::jsonb
+		`, string(sealed), row.userID, row.adminAccountID, row.session)
+		if err != nil {
+			return changed, err
+		}
+		changed += int(tag.RowsAffected())
+	}
+	return changed, nil
+}
+
+// EncryptLegacyUpstreamKeys 把加密之前保存的明文上游 Key 改成加密保存，返回改了几条对接记录。
+// 只改仍是明文、且期间没被改过的行。
+func (r *Repository) EncryptLegacyUpstreamKeys(ctx context.Context) (int, error) {
+	if r.secrets == nil {
+		return 0, nil
+	}
+	rows, err := r.db.Query(ctx, `SELECT id, upstream_key FROM real_connections WHERE upstream_key <> ''`)
+	if err != nil {
+		return 0, err
+	}
+	type legacyRow struct{ id, key string }
+	var legacy []legacyRow
+	for rows.Next() {
+		var row legacyRow
+		if err := rows.Scan(&row.id, &row.key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !secretbox.IsSealed(row.key) {
+			legacy = append(legacy, row)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, row := range legacy {
+		sealed, err := r.secrets.Seal([]byte(row.key), upstreamKeyAAD(row.id))
+		if err != nil {
+			return changed, err
+		}
+		tag, err := r.db.Exec(ctx, `UPDATE real_connections SET upstream_key = $1 WHERE id = $2 AND upstream_key = $3`, sealed, row.id, row.key)
+		if err != nil {
+			return changed, err
+		}
+		changed += int(tag.RowsAffected())
+	}
+	return changed, nil
 }
